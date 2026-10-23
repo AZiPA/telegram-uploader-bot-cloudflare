@@ -1,0 +1,341 @@
+name: Deploy Worker
+
+on:
+  push:
+    branches:
+      - main
+    # GitHub Pages (docs/) and the repo manuals are not the Worker.
+    # A push that only touches these paths does not deploy. A push that also
+    # changes the Worker still deploys. workflow_dispatch is unaffected.
+    paths-ignore:
+      - "docs/**"
+      - "README*.md"
+      - ".github/workflows/docs.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      custom_db_name:
+        description: 'Optional: Custom D1 Database Name'
+        required: false
+        default: ''
+        type: string
+      custom_db_region:
+        description: 'Optional: D1 Location Hint for new DB (weur, eeur, enam, wnam, apac, oc)'
+        required: false
+        default: 'weur'
+        type: choice
+        options:
+          - weur
+          - eeur
+          - enam
+          - wnam
+          - apac
+          - oc
+      custom_worker_name:
+        description: 'Optional: Custom Worker Name'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Type Check
+        run: |
+          npx tsc --noEmit
+          node scripts/verify.mjs
+
+      - name: Validate Required Secrets
+        env:
+          WEBHOOK_PATH: ${{ secrets.WEBHOOK_PATH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          BOT_USERNAME: ${{ secrets.BOT_USERNAME }}
+        run: |
+          if [ -z "$WEBHOOK_PATH" ]; then
+            echo "::error::Secret WEBHOOK_PATH is missing!"
+            exit 1
+          fi
+          if [ -z "$BOT_TOKEN" ]; then
+            echo "::error::Secret BOT_TOKEN is missing!"
+            exit 1
+          fi
+          if [ -z "$OWNER_ID" ]; then
+            echo "::error::Secret OWNER_ID is missing!"
+            exit 1
+          fi
+          if ! printf '%s' "$OWNER_ID" | grep -Eq '^[0-9]{1,15}$'; then
+            echo "::error::Secret OWNER_ID must be a numeric Telegram user id (up to 15 digits)!"
+            exit 1
+          fi
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::Secret CLOUDFLARE_API_TOKEN is missing!"
+            exit 1
+          fi
+          if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::Secret CLOUDFLARE_ACCOUNT_ID is missing!"
+            exit 1
+          fi
+          if [ -z "$WEBHOOK_SECRET" ]; then
+            echo "::error::Secret WEBHOOK_SECRET is missing!"
+            exit 1
+          fi
+          if [ ${#WEBHOOK_SECRET} -lt 16 ]; then
+            echo "::error::Secret WEBHOOK_SECRET must be at least 16 characters long!"
+            exit 1
+          fi
+          if [ -n "$BOT_USERNAME" ]; then
+            CLEAN_USERNAME=$(echo "$BOT_USERNAME" | sed 's/^@//')
+            if ! echo "$CLEAN_USERNAME" | grep -Eq '^[a-zA-Z][a-zA-Z0-9_]{4,31}$'; then
+              echo "::error::Secret BOT_USERNAME format is invalid (must start with a letter, 5-32 alphanumeric or underscores)."
+              exit 1
+            fi
+          fi
+
+      - name: Provision D1 Database & Sync Config
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          INPUT_DB_NAME: ${{ inputs.custom_db_name }}
+          INPUT_DB_REGION: ${{ inputs.custom_db_region || vars.D1_LOCATION || 'weur' }}
+          INPUT_WORKER_NAME: ${{ inputs.custom_worker_name }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
+        run: |
+          # 1. Sanitize inputs to lowercase kebab-case (alphanumeric and hyphens)
+          CLEAN_DB_NAME=$(node -e "
+            const raw = process.env.INPUT_DB_NAME || '';
+            const clean = raw.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+            process.stdout.write(clean);
+          ")
+          CLEAN_WORKER_NAME=$(node -e "
+            const raw = process.env.INPUT_WORKER_NAME || '';
+            const clean = raw.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+            process.stdout.write(clean);
+          ")
+
+          # 2. Determine target database region hint & validate against supported Cloudflare hints
+          DB_REGION=$(node -e "
+            const raw = (process.env.INPUT_DB_REGION || 'weur').trim().toLowerCase();
+            process.stdout.write(raw || 'weur');
+          ")
+          export DB_REGION
+
+          if ! printf '%s' "$DB_REGION" | grep -Eq '^(weur|eeur|enam|wnam|apac|oc)$'; then
+            echo "::error::D1 region hint must be one of: weur, eeur, enam, wnam, apac, oc. Received: '$DB_REGION'"
+            exit 1
+          fi
+          echo "Target D1 Region Hint: $DB_REGION"
+
+          # 3. Determine target worker name & fallback cleanly to wrangler.toml default
+          if [ -n "$CLEAN_WORKER_NAME" ]; then
+            WORKER_NAME="$CLEAN_WORKER_NAME"
+            echo "Target Worker Name: $WORKER_NAME"
+            sed -i "s/^name = .*/name = \"$WORKER_NAME\"/" wrangler.toml
+          fi
+
+          # 4. Determine target database name & fallback cleanly to wrangler.toml default
+          if [ -n "$CLEAN_DB_NAME" ]; then
+            DB_NAME="$CLEAN_DB_NAME"
+          else
+            DB_NAME=$(node -e "
+              const fs = require('fs');
+              const toml = fs.readFileSync('wrangler.toml', 'utf-8');
+              const match = toml.match(/database_name\s*=\s*[\"']([^\"']+)[\"']/);
+              process.stdout.write(match ? match[1] : 'filestore-db');
+            ")
+          fi
+
+          echo "Target Database Name: $DB_NAME"
+          export DB_NAME
+
+          if ! printf '%s' "$DB_NAME" | grep -Eq '^[a-z0-9][a-z0-9-]{0,62}$'; then
+            echo "::error::Database name must be lowercase kebab-case. Refusing to interpolate it."
+            exit 1
+          fi
+
+          # 5-6. Resolve an existing D1 database or create it with primary_location_hint.
+          # Cloudflare REST is non-interactive: no TTY prompt, no wrangler banner mixed into JSON.
+          # A database that already exists (dashboard or a previous run) is reused as-is.
+          # primary_location_hint is sent only on create. It is not a jurisdiction flag.
+          TARGET_ID=$(node <<'NODE'
+          const token = process.env.CLOUDFLARE_API_TOKEN;
+          const account = process.env.CLOUDFLARE_ACCOUNT_ID;
+          const name = process.env.DB_NAME;
+          const region = process.env.DB_REGION || "weur";
+          if (!token || !account || !name) {
+            console.error("Missing Cloudflare credentials or DB_NAME");
+            process.exit(1);
+          }
+          const api = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account)}/d1/database`;
+
+          async function cf(url, options = {}) {
+            const res = await fetch(url, {
+              method: options.method || "GET",
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+              },
+              body: options.body,
+            });
+            const text = await res.text();
+            let body;
+            try {
+              body = JSON.parse(text);
+            } catch {
+              body = { success: false, errors: [{ message: text.slice(0, 300) }] };
+            }
+            return { status: res.status, body };
+          }
+
+          async function findUuid() {
+            for (let page = 1; page <= 20; page++) {
+              const url = `${api}?per_page=100&page=${page}&name=${encodeURIComponent(name)}`;
+              const { status, body } = await cf(url);
+              if (!body || body.success !== true) {
+                const msg = JSON.stringify((body && body.errors) || body).slice(0, 400);
+                throw new Error(`D1 list failed (${status}): ${msg}`);
+              }
+              const rows = Array.isArray(body.result) ? body.result : [];
+              const hit = rows.find((row) => row && row.name === name && row.uuid);
+              if (hit) return hit.uuid;
+              const info = body.result_info || {};
+              const total = Number(info.total_count || rows.length);
+              const per = Number(info.per_page || rows.length || 100);
+              if (rows.length === 0 || page * per >= total) break;
+            }
+            return "";
+          }
+
+          (async () => {
+            let uuid = await findUuid();
+            if (!uuid) {
+              console.error(`Database '${name}' not found. Creating in ${region}...`);
+              const created = await cf(api, {
+                method: "POST",
+                body: JSON.stringify({ name, primary_location_hint: region }),
+              });
+              if (created.body && created.body.success && created.body.result && created.body.result.uuid) {
+                uuid = created.body.result.uuid;
+              } else {
+                uuid = await findUuid();
+                if (!uuid) {
+                  const msg = JSON.stringify((created.body && created.body.errors) || created.body).slice(0, 500);
+                  throw new Error(`D1 create failed: ${msg}`);
+                }
+                console.error(`Database '${name}' appeared during create. Reusing it.`);
+              }
+            } else {
+              console.error(`Database '${name}' already exists. Reusing it.`);
+            }
+            if (!/^[0-9a-f-]{36}$/i.test(uuid)) {
+              throw new Error("Resolved D1 uuid is not a UUID.");
+            }
+            process.stdout.write(uuid);
+          })().catch((err) => {
+            console.error(err && err.message ? err.message : err);
+            process.exit(1);
+          });
+          NODE
+          )
+
+          if ! printf '%s' "$TARGET_ID" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
+            echo "::error::D1 UUID missing or invalid. Refusing to deploy."
+            exit 1
+          fi
+
+          # 6. Mask the database UUID in logs for security
+          echo "::add-mask::$TARGET_ID"
+
+          # 7. Inject configuration into wrangler.toml
+          sed -i "s/database_name = .*/database_name = \"$DB_NAME\"/" wrangler.toml
+          sed -i "s/database_id = .*/database_id = \"$TARGET_ID\"/" wrangler.toml
+
+          # 8. Apply database schema
+          npx wrangler d1 execute "$DB_NAME" --remote --file=./schema.sql -y
+
+          # 9. Ensure role column exists on pre-existing tables & bundle columns
+          npx wrangler d1 execute "$DB_NAME" --remote --command="ALTER TABLE admins ADD COLUMN role TEXT NOT NULL DEFAULT 'admin';" -y || true
+          npx wrangler d1 execute "$DB_NAME" --remote --command="ALTER TABLE bundles ADD COLUMN owner_locked INTEGER NOT NULL DEFAULT 0;" -y || true
+          npx wrangler d1 execute "$DB_NAME" --remote --command="ALTER TABLE bundles ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0;" -y || true
+          npx wrangler d1 execute "$DB_NAME" --remote --command="ALTER TABLE bundles ADD COLUMN is_one_time INTEGER NOT NULL DEFAULT 0;" -y || true
+          npx wrangler d1 execute "$DB_NAME" --remote --command="ALTER TABLE bundles ADD COLUMN consumed_by INTEGER NOT NULL DEFAULT 0;" -y || true
+          npx wrangler d1 execute "$DB_NAME" --remote --command="ALTER TABLE bundles ADD COLUMN passcode_hash TEXT DEFAULT NULL;" -y || true
+          npx wrangler d1 execute "$DB_NAME" --remote --command="ALTER TABLE bundles ADD COLUMN post_channel_id TEXT DEFAULT NULL;" -y || true
+          npx wrangler d1 execute "$DB_NAME" --remote --command="ALTER TABLE bundles ADD COLUMN post_message_id INTEGER NOT NULL DEFAULT 0;" -y || true
+          npx wrangler d1 execute "$DB_NAME" --remote --command="ALTER TABLE bundles ADD COLUMN rotate_interval_sec INTEGER NOT NULL DEFAULT 0;" -y || true
+          npx wrangler d1 execute "$DB_NAME" --remote --command="ALTER TABLE bundles ADD COLUMN last_rotated_at INTEGER NOT NULL DEFAULT 0;" -y || true
+
+          # 10. Seed Owner ID. The value stays in the environment and must be digits only.
+          if ! printf '%s' "$OWNER_ID" | grep -Eq '^[0-9]{1,15}$'; then
+            echo "::error::OWNER_ID must be a numeric Telegram user id (up to 15 digits). Refusing to build SQL."
+            exit 1
+          fi
+          npx wrangler d1 execute "$DB_NAME" --remote --command="INSERT INTO admins (user_id, role, added_by, created_at) VALUES (${OWNER_ID}, 'owner', ${OWNER_ID}, unixepoch()) ON CONFLICT(user_id) DO UPDATE SET role = 'owner';" -y
+
+      - name: Deploy Worker & Inject Secrets Securely
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
+          STORAGE_CHANNEL_ID: ${{ secrets.STORAGE_CHANNEL_ID }}
+          LOG_CHANNEL_ID: ${{ secrets.LOG_CHANNEL_ID }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WEBHOOK_PATH: ${{ secrets.WEBHOOK_PATH }}
+          BOT_USERNAME: ${{ secrets.BOT_USERNAME }}
+          BOT_FIRST_NAME: ${{ secrets.BOT_FIRST_NAME }}
+        run: |
+          npx wrangler deploy
+
+          # Optional secrets are omitted when empty: STORAGE_CHANNEL_ID, LOG_CHANNEL_ID, BOT_FIRST_NAME, BOT_USERNAME.
+          node -e '
+            const s = {};
+            const botToken = (process.env.BOT_TOKEN || "").trim();
+            if (botToken) s.BOT_TOKEN = botToken;
+
+            const ownerId = (process.env.OWNER_ID || "").trim();
+            if (ownerId) s.OWNER_ID = ownerId;
+
+            const storageChannelId = (process.env.STORAGE_CHANNEL_ID || "").trim();
+            if (storageChannelId) s.STORAGE_CHANNEL_ID = storageChannelId;
+
+            const logChannelId = (process.env.LOG_CHANNEL_ID || "").trim();
+            if (logChannelId) s.LOG_CHANNEL_ID = logChannelId;
+
+            const webhookSecret = (process.env.WEBHOOK_SECRET || "").trim();
+            if (webhookSecret) s.WEBHOOK_SECRET = webhookSecret;
+
+            const webhookPath = (process.env.WEBHOOK_PATH || "").trim();
+            if (webhookPath) s.WEBHOOK_PATH = webhookPath;
+
+            const botUsername = (process.env.BOT_USERNAME || "").trim().replace(/^@/, "");
+            if (botUsername) s.BOT_USERNAME = botUsername;
+
+            const botFirstName = (process.env.BOT_FIRST_NAME || "").trim();
+            if (botFirstName) s.BOT_FIRST_NAME = botFirstName;
+
+            process.stdout.write(JSON.stringify(s));
+          ' | npx wrangler secret bulk
