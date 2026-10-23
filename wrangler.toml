@@ -1,0 +1,39 @@
+name = "telegram-filestore-bot"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "filestore-db"
+database_id = "PLACEHOLDER_D1_ID"
+
+[[analytics_engine_datasets]]
+binding = "FILESTORE_ANALYTICS"
+dataset = "filestore_analytics"
+
+# ==============================================================================
+# Observability & Logging (Disabled by default to save free-tier quotas)
+# This is Workers Logs / traces, not the FILESTORE_ANALYTICS dataset.
+# Leave it commented. A live tail (`npx wrangler tail`) prints console output
+# for the session only: it does not persist logs and does not spend D1,
+# Analytics Engine, or Workers Logs inclusion quota.
+# Uncomment only while debugging. head_sampling_rate = 1 stores every
+# invocation (including 1,440 cron fires/day). Prefer a low rate such as 0.01.
+# ==============================================================================
+#[observability]
+#enabled = true
+#head_sampling_rate = 1
+
+#[observability.logs]
+#enabled = true
+#invocation_logs = true
+
+#[observability.traces]
+#enabled = false
+
+#[observability.issue_detection]
+#enabled = true
