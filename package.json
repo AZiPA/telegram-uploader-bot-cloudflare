@@ -1,0 +1,19 @@
+{
+  "name": "telegram-filestore-bot",
+  "version": "1.0.0",
+  "description": "Serverless Telegram file storage and sharing bot on Cloudflare Workers and D1.",
+  "main": "src/index.ts",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "migrate": "wrangler d1 execute filestore-db --remote --file=./schema.sql"
+  },
+  "dependencies": {
+    "grammy": "^1.46.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261002.1",
+    "@types/node": "^26.6.4",
+    "typescript": "^5.7.3",
+    "wrangler": "^4.0.0"
+  }
+}
