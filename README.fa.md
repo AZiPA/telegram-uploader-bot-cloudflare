@@ -4,7 +4,7 @@
 
 نسخهٔ چندصفحه‌ای همین راهنما در [`docs/fa/`](./docs/fa/index.md) است و روی GitHub Pages منتشر می‌شود. این فایل همان متن، در یک صفحه، می‌ماند.
 
-ربات فایل‌استور تلگرام برای پلن رایگان Cloudflare Workers و یک پایگاه D1. نسخه **۳.۳.۰**. بدون VPS، بدون محصول پولی کلودفلر، و بدون عبور بایت فایل از داخل Worker.
+ربات فایل‌استور تلگرام برای پلن رایگان Cloudflare Workers و یک پایگاه D1. نسخه **۱.۰.۰**. بدون VPS، بدون محصول پولی کلودفلر، و بدون عبور بایت فایل از داخل Worker.
 
 > [!TIP]
 > **علاقه‌مند به نسخه سرورلس تلگرام (@tgcloud/bot) هستید؟**
@@ -129,7 +129,7 @@ WHERE code = ? AND items = ?;
 
 ### ۲.۲ کار GitHub Actions با این پایگاه
 
-[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) روی هر push به `main` و روی **Run workflow** اجرا می‌شود. جاب Node ۲۴ است و `npm install --legacy-peer-deps` می‌زند، نه `npm ci`. بعد `tsc --noEmit`، سپس:
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) روی هر push به `main` و روی **Run workflow** اجرا می‌شود. جاب Node ۲۴ است و `npm install --legacy-peer-deps` می‌زند، نه `npm ci`، سپس:
 
 1. نام پایگاه را از `wrangler.toml` می‌خواند، مگر فرم ورک‌فلو نام دیگری بدهد.
 2. با REST لیست می‌گیرد و ردیفی که `name` دقیقاً یکی باشد را نگه می‌دارد.

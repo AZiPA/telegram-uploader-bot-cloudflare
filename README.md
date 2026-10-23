@@ -129,7 +129,7 @@ What the schema creates: `bundles`, `admin_sessions`, `bundle_votes`, `deletion_
 
 ### 2.2 What GitHub Actions does with that database
 
-[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) runs on every push to `main` and on **Run workflow**. The job uses Node 24 and `npm install --legacy-peer-deps` (not `npm ci`: `package-lock.json` is gitignored). It typechecks with `tsc --noEmit`, then:
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) runs on every push to `main` and on **Run workflow**. The job uses Node 24 and `npm install --legacy-peer-deps` (not `npm ci`: `package-lock.json` is gitignored), then:
 
 1. Reads `database_name` from `wrangler.toml`, unless you typed a custom name into the workflow form. Custom names are lowercased to kebab-case. Empty input keeps `filestore-db`.
 2. Lists D1 databases with `GET /accounts/{account_id}/d1/database?name=...` and keeps the row whose `name` matches exactly.
