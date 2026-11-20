@@ -180,7 +180,7 @@ export default {
                     "UPDATE bundle_votes SET code = ? WHERE code = ?"
                   ).bind(newCode, oldCode),
                   env.DB.prepare(
-                    "UPDATE user_downloads SET bundle_code = ? WHERE bundle_code = ? AND access_date = date('now')"
+                    "UPDATE user_downloads SET code = ? WHERE code = ? AND access_date = date('now')"
                   ).bind(newCode, oldCode)
                 ]);
 
