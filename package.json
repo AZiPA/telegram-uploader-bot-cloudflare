@@ -2,6 +2,7 @@
   "name": "telegram-filestore-bot",
   "version": "1.0.0",
   "description": "Serverless Telegram file storage and sharing bot on Cloudflare Workers and D1.",
+  "license": "MPL-2.0",
   "main": "src/index.ts",
   "scripts": {
     "deploy": "wrangler deploy",
